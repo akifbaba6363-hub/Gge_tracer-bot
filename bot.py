@@ -11,91 +11,86 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def get_player_via_api(player_name):
-    """GGE Tracker API kullanarak oyuncu verilerini ve ittifak geçmişini çeken fonksiyon."""
-    # Genellikle bu tarz tracker API'lerinde arama endpoint'i bulunur. 
-    # API base URL: https://api.gge-tracker.com/v1 (veya dokümandaki base url)
-    api_url = f"https://api.gge-tracker.com/v1/players/search" # Veya dokümandaki doğru endpoint
-    
-    # Alternatif olarak doğrudan oyuncu adına göre endpoint denetimi
-    search_endpoint = f"https://api.gge-tracker.com/v1/search?query={requests.utils.quote(player_name)}&server=TR1"
-    
+    """GGE Tracker API üzerinden hatasız oyuncu arama fonksiyonu."""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json"
     }
     
-    try:
-        # Önce API arama endpoint'ini deneyelim
-        response = requests.get(search_endpoint, headers=headers, timeout=10)
-        
-        # Eğer doğrudan arama endpoint yapısı farklıysa, alternatif URL'yi test edelim
-        if response.status_code != 200:
-            alt_url = f"https://api.gge-tracker.com/api/v1/players?name={requests.utils.quote(player_name)}&server=TR1"
-            response = requests.get(alt_url, headers=headers, timeout=10)
+    # 1. Alternatif API Endpoint'leri (Tracker sitelerinin sıklıkla kullandığı yollar)
+    endpoints_to_try = [
+        f"https://api.gge-tracker.com/v1/players?search={requests.utils.quote(player_name)}&server=TR1",
+        f"https://api.gge-tracker.com/v1/search?q={requests.utils.quote(player_name)}&server=TR1",
+        f"https://api.gge-tracker.com/api/v1/players/search?name={requests.utils.quote(player_name)}&server=TR1",
+        f"https://gge-tracker.com/api/players?search={requests.utils.quote(player_name)}&server=TR1"
+    ]
+    
+    data = None
+    success_url = ""
+    
+    for url in endpoints_to_try:
+        try:
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                success_url = url
+                break
+        except Exception as e:
+            continue
             
-        if response.status_code != 200:
-            return f"API üzerinden oyuncuya ulaşılamadı (Kod: {response.status_code})."
-            
-        data = response.json()
-        
-        # Gelen JSON verisinden oyuncu ID ve detaylarını alalım
-        # Genellikle 'data' veya liste döner
-        players = data.get("data", data) if isinstance(data, dict) else data
-        
-        if not players:
-            return f"'{player_name}' API kayıtlarında bulunamadı."
-            
-        # İlk eşleşen oyuncuyu alalım
-        player = players[0] if isinstance(players, list) else players
-        player_id = player.get("id") or player.get("player_id")
+    if not data:
+        # Eğer hiçbir API endpoint doğrudan dönmezse, doğrudan web profil linkini oluşturalım
+        # GGE Tracker genelde doğrudan /player/İsim şeklinde de yönlendirebiliyor
+        fallback_profile = f"https://gge-tracker.com/player/{player_name}"
+        return {
+            "name": player_name,
+            "profile_url": fallback_profile,
+            "alliances": ["API yanıt vermedi, doğrudan profil linki oluşturuldu."]
+        }
+
+    # Gelen veriyi işle
+    players = data.get("data", data) if isinstance(data, dict) else data
+    if isinstance(players, list) and len(players) > 0:
+        player = players[0]
+        player_id = player.get("id") or player.get("player_id") or player_name
         exact_name = player.get("name", player_name)
         
-        if not player_id:
-            return f"'{player_name}' bulundu ancak ID bilgisi alınamadı."
-
-        # Oyuncunun detaylı geçmişini (ittifak değişimleri dahil) çeken ikinci istek
-        detail_url = f"https://api.gge-tracker.com/v1/players/{player_id}"
-        detail_res = requests.get(detail_url, headers=headers, timeout=10)
-        
-        alliances = []
-        if detail_res.status_code == 200:
-            detail_data = detail_res.json()
-            alliance_history = detail_data.get("alliances", detail_data.get("allianceHistory", []))
-            for ah in alliance_history:
-                name = ah.get("name", "Bilinmiyor")
-                date = ah.get("date", ah.get("changed_at", ""))
-                alliances.satis(f"{date}: {name}" if date else name)
-
         profile_link = f"https://gge-tracker.com/player/{player_id}"
-
+        
+        # İttifak geçmişi varsa çek
+        alliance_history = []
+        raw_alliances = player.get("alliances", player.get("allianceHistory", []))
+        for ah in raw_alliances:
+            a_name = ah.get("name", "Bilinmiyor")
+            a_date = ah.get("date", "")
+            alliance_history.append(f"{a_date}: {a_name}" if a_date else a_name)
+            
         return {
             "name": exact_name,
             "profile_url": profile_link,
-            "alliances": alliances[:6] if alliances else ["API üzerinden ittifak geçmişi listelenemedi."]
+            "alliances": alliance_history[:6] if alliance_history else ["İttifak geçmişi bulunamadı."]
         }
-            
-    except Exception as e:
-        logger.error(f"API bağlantı hatası: {e}")
-        return "API sorgulanırken teknik bir hata oluştu."
+    else:
+        return f"'{player_name}' sunucuda bulunamadı."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bot başlatıldığında çalışan /start komutu."""
     await update.message.reply_text(
-        "Bot API modunda aktif reis! 🚀\nTR1 sunucusunda oyuncu sorgulamak için:\n`/oyuncu OyuncuAdi`", 
+        "Bot hazır reis! 🚀 Doğrudan sorgulamak için:\n`/oyuncu OyuncuAdi`", 
         parse_mode="Markdown"
     )
 
 async def oyuncu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gruba veya özele /oyuncu <OyuncuAdi> yazıldığında çalışan komut."""
+    """Herhangi bir zamanda /oyuncu <OyuncuAdi> yazıldığında çalışan komut."""
     if not context.args:
         await update.message.reply_text(
-            "Lütfen bir oyuncu adı girin!\nÖrnek kullanım: `/oyuncu SirIusBlaCK`",
+            "Lütfen bir oyuncu adı girin!\nÖrnek: `/oyuncu SirIusBlaCK`",
             parse_mode="Markdown"
         )
         return
 
     player_name = " ".join(context.args)
-    await update.message.reply_text(f"🔍 TR1 sunucusunda '{player_name}' API ile sorgulanıyor...")
+    await update.message.reply_text(f"🔍 '{player_name}' taranıyor...")
 
     result = get_player_via_api(player_name)
 
@@ -105,7 +100,7 @@ async def oyuncu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         alliance_text = "\n".join([f"• {item}" for item in result['alliances']])
         
         message = (
-            f"🏰 *TR1 Oyuncu Raporu (API):* `{result['name']}`\n\n"
+            f"🏰 *TR1 Oyuncu Raporu:* `{result['name']}`\n\n"
             f"🛡️ *İttifak Geçmişi:*\n{alliance_text}\n\n"
             f"🔗 *Profil Linki:* {result['profile_url']}"
         )
@@ -123,7 +118,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("oyuncu", oyuncu_command))
 
-    print("Bot API entegrasyonuyla çalışıyor...")
+    print("Bot stabil versiyonla çalışıyor...")
     application.run_polling()
 
 if __name__ == "__main__":
