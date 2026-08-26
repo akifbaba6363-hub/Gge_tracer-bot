@@ -14,58 +14,53 @@ logger = logging.getLogger(__name__)
 # MİMLİ / DÜŞMAN İTTİFAKLAR LİSTESİ
 MIMLI_ITTIFAKLAR = ["GÖKDOĞAN", "DüşmanKlan1", "TheOttomans", "BlackDeath"]
 
-def get_player_real_stats(player_name):
-    """Sitenin güvenlik duvarını aşmak için tam tarayıcı taklidi yapan gelişmiş fonksiyon."""
-    # Doğrudan ana sitenin oyuncu arama URL'si
-    search_url = f"https://gge-tracker.com/players?player={requests.utils.quote(player_name)}&server=TR1"
-    
-    # Gerçek bir tarayıcının gönderdiği tüm gizli başlıkları ekliyoruz ki site bizi engellemesin
+def get_player_real_stats(player_query):
+    """Bulut korumalarını ve yönlendirmeleri aşan güncellenmiş arama fonksiyonu."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": "https://gge-tracker.com/",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1"
+        "Cache-Control": "no-cache"
     }
     
-    try:
-        # Oturum (Session) kullanarak istek atalım
-        session = requests.Session()
-        res = session.get(search_url, headers=headers, timeout=15)
+    player_link = None
+    
+    # 1. Eğer kullanıcı direkt ID girdiyse doğrudan profil linkini kur
+    if player_query.isdigit():
+        player_link = f"https://gge-tracker.com/player/{player_query}"
+    else:
+        # 2. İsimle arama yaparken hem küçük harfli hem orijinal halini deneyelim
+        queries_to_try = [player_query, player_query.lower(), player_query.capitalize()]
         
-        if res.status_code != 200:
-            return f"Site engeline takıldık (Kod: {res.status_code})."
-            
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        player_path = None
-        
-        # 1. Sayfadaki oyuncu linklerini tara (/player/ID)
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if '/player/' in href:
-                player_path = href
-                break
+        for q in queries_to_try:
+            search_url = f"https://gge-tracker.com/players?player={requests.utils.quote(q)}&server=TR1"
+            try:
+                session = requests.Session()
+                res = session.get(search_url, headers=headers, timeout=12)
                 
-        # 2. Tablo satırlarından yakalamaya çalış
-        if not player_path:
-            for row in soup.find_all('tr'):
-                if player_name.lower() in row.get_text().lower():
-                    link_tag = row.find('a', href=True)
-                    if link_tag:
-                        player_path = link_tag['href']
+                if res.status_code == 200:
+                    soup = BeautifulSoup(res.text, 'html.parser')
+                    
+                    # Sayfadaki oyuncu linklerini tara
+                    for a in soup.find_all('a', href=True):
+                        href = a['href']
+                        if '/player/' in href:
+                            player_link = "https://gge-tracker.com" + href if href.startswith('/') else href
+                            break
+                    if player_link:
                         break
+            except Exception as e:
+                logger.error(f"Arama deneme hatası: {e}")
 
-        if not player_path:
-            return f"'{player_name}' TR1 sunucusunda bulunamadı."
+    if not player_link:
+        return f"'{player_query}' TR1 sunucusunda bulunamadı. Sitede ismin nasıl geçtiğini kontrol edebilirsin."
 
-        # Profil linkini tamamla
-        profile_link = "https://gge-tracker.com" + player_path if not player_path.startswith('http') else player_path
-        alliance_page_link = f"{profile_link}#alliances"
+    alliance_page_link = f"{player_link}#alliances"
 
-        # Oyuncunun profil sayfasına gidip detayları (güç ve ittifaklar) çekelim
-        profile_res = session.get(profile_link, headers=headers, timeout=15)
+    try:
+        session = requests.Session()
+        profile_res = session.get(player_link, headers=headers, timeout=12)
         
         might_value = "Bilinmiyor"
         level_value = "Bilinmiyor"
@@ -74,20 +69,16 @@ def get_player_real_stats(player_name):
         if profile_res.status_code == 200:
             p_soup = BeautifulSoup(profile_res.text, 'html.parser')
             
-            # Sayfadaki metinleri ve elementleri tarayalım
             for el in p_soup.find_all(['div', 'span', 'td', 'li', 'p', 'b']):
                 text = el.get_text(strip=True)
                 
-                # İttifak geçmişi tarih formatları kontrolü
+                # İttifak geçmişi tarih kalıpları
                 if any(m in text for m in ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]) and len(text) < 100:
                     if text not in alliances:
                         alliances.append(text)
                         
-                # Güç tespiti
                 if "might" in text.lower() or "güç" in text.lower():
                     might_value = text
-                    
-                # Seviye tespiti
                 if "level" in text.lower() or "seviye" in text.lower():
                     level_value = text
 
@@ -100,7 +91,7 @@ def get_player_real_stats(player_name):
                         bulunan_dusmanlar.append(mimli)
 
         return {
-            "name": player_name,
+            "name": player_query,
             "level": level_value,
             "might": might_value,
             "alliances": alliances[:5] if alliances else ["İttifak geçmişi detay sayfasında."],
@@ -109,12 +100,12 @@ def get_player_real_stats(player_name):
         }
             
     except Exception as e:
-        logger.error(f"Hata: {e}")
-        return "Bağlantı sırasında teknik bir hata oluştu."
+        logger.error(f"Profil hata: {e}")
+        return "Profil verileri çekilirken hata oluştu."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Bot korumayı aşacak şekilde güncellendi reis! 🚀 Sorgulamak için:\n`/oyuncu OyuncuAdi`", 
+        "Bot en kararlı sürümle aktif reis! 🚀 Sorgulamak için:\n`/oyuncu OyuncuAdi`", 
         parse_mode="Markdown"
     )
 
@@ -126,10 +117,10 @@ async def oyuncu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    player_name = " ".join(context.args)
-    await update.message.reply_text(f"🔍 TR1 sunucusunda '{player_name}' taranıyor ve düşman analizi yapılıyor...")
+    player_query = " ".join(context.args)
+    await update.message.reply_text(f"🔍 TR1 havuzunda '{player_query}' taranıyor...")
 
-    result = get_player_real_stats(player_name)
+    result = get_player_real_stats(player_query)
 
     if isinstance(result, str):
         await update.message.reply_text(result)
@@ -163,7 +154,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("oyuncu", oyuncu_command))
 
-    print("Bot koruma aşmalı sürümle çalışıyor...")
+    print("Bot kararlı sürümle çalışıyor...")
     application.run_polling()
 
 if __name__ == "__main__":
