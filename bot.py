@@ -12,8 +12,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def get_player_stats(player_name):
-    """GGE Tracker sitesinden oyuncu verilerini çeken fonksiyon."""
-    url = "https://gge-tracker.com/players"
+    """GGE Tracker sitesinden TR1 sunucusuna göre oyuncu arayan fonksiyon."""
+    # TR1 sunucusu için hedef URL (veya ana sayfa üzerinden arama)
+    url = f"https://gge-tracker.com/players?search={player_name}&server=TR1"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -23,9 +24,11 @@ def get_player_stats(player_name):
         response = requests.get(url, headers=headers, timeout=10)
         
         if response.status_code != 200:
-            return "Oyuncu bulunamadı"
+            return "Oyuncu bulunamadı veya siteye ulaşılamadı."
             
         soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Tablo satırlarını bulalım
         player_rows = soup.find_all('tr')
         
         found_data = None
@@ -35,7 +38,7 @@ def get_player_stats(player_name):
                 break
                 
         if not found_data:
-            return "Oyuncu bulunamadı"
+            return f"'{player_name}' adında bir oyuncu TR1 sunucusunda bulunamadı."
             
         columns = found_data.find_all('td')
         
@@ -50,27 +53,30 @@ def get_player_stats(player_name):
                 "alliance_history": alliance_history
             }
         else:
-            return "Oyuncu bulunamadı"
+            return "Oyuncu bilgileri okunamadı."
             
     except Exception as e:
         logger.error(f"Veri çekme hatası: {e}")
-        return "Oyuncu bulunamadı"
+        return "Veri çekilirken bir hata oluştu."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bot başlatıldığında çalışan /start komutu."""
-    await update.message.reply_text("Bot çalışıyor reis! 🚀\nOyuncu sorgulamak için: `/oyuncu OyuncuAdi`", parse_mode="Markdown")
+    await update.message.reply_text(
+        "Bot aktif reis! 🚀\nTR1 sunucusunda oyuncu sorgulamak için:\n`/oyuncu OyuncuAdi`", 
+        parse_mode="Markdown"
+    )
 
 async def oyuncu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gruba /oyuncu <OyuncuAdi> yazıldığında çalışan komut."""
+    """Gruba veya özele /oyuncu <OyuncuAdi> yazıldığında çalışan komut."""
     if not context.args:
         await update.message.reply_text(
-            "Lütfen bir oyuncu adı girin!\nÖrnek kullanım: `/oyuncu -OKKA-`",
+            "Lütfen bir oyuncu adı girin!\nÖrnek kullanım: `/oyuncu siriusblack`",
             parse_mode="Markdown"
         )
         return
 
     player_name = " ".join(context.args)
-    await update.message.reply_text(f"🔍 '{player_name}' aranıyor, lütfen bekleyin...")
+    await update.message.reply_text(f"🔍 TR1 sunucusunda '{player_name}' aranıyor, bekletmeyecem...")
 
     result = get_player_stats(player_name)
 
@@ -78,7 +84,7 @@ async def oyuncu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(result)
     else:
         message = (
-            f"🏰 *Oyuncu Raporu:* `{player_name}`\n\n"
+            f"🏰 *TR1 Oyuncu Raporu:* `{player_name}`\n\n"
             f"⭐ *Kale Seviyesi:* {result['castle_level']}\n"
             f"⚔️ *Güç Puanı (Might):* {result['might']}\n"
             f"🛡️ *İttifak Geçmişi:* {result['alliance_history']}"
@@ -86,20 +92,18 @@ async def oyuncu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(message, parse_mode="Markdown")
 
 def main():
-    # Railway'den veya ortam değişkenlerinden token al
     TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
     
     if not TOKEN:
-        print("HATA: BOT_TOKEN veya TELEGRAM_TOKEN çevresel değişkeni bulunamadı!")
+        print("HATA: BOT_TOKEN bulunamadı!")
         return
 
     application = ApplicationBuilder().token(TOKEN).build()
     
-    # Komut handler'ları ekleniyor
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("oyuncu", oyuncu_command))
 
-    print("Bot başlatıldı ve çalışıyor...")
+    print("Bot TR1 için güncellendi ve çalışıyor...")
     application.run_polling()
 
 if __name__ == "__main__":
