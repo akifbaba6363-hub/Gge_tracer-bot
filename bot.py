@@ -21,7 +21,17 @@ SERVER_HEADER_NAME = "gge-server"
 SERVER_VALUE = "TR1"
 
 # MİMLİ / DÜŞMAN İTTİFAKLAR LİSTESİ
-MIMLI_ITTIFAKLAR = ["GÖKDOĞAN", "DüşmanKlan1", "TheOttomans", "BlackDeath"]
+MIMLI_ITTIFAKLAR = [
+    "Grand Alliance",
+    "ELITE",
+    "DARK OF SOUL",
+    "PAYİTAHT",
+    "GÖKDOĞAN",
+    "VICTORY",
+    "SARSILMAZ",
+    "WARRIOR",
+    "ELITE 2",
+]
 
 HEADERS = {
     SERVER_HEADER_NAME: SERVER_VALUE,
@@ -222,6 +232,59 @@ async def oyuncutest_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(f"```\n{raw_text}\n```", parse_mode="Markdown")
 
 
+async def gecmistest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    SADECE TEST İÇİN: /updates/players/{playerId}/alliances adresinin
+    ham (işlenmemiş) cevabını olduğu gibi gösterir. Bunu bir kere
+    çalıştırıp Claude'a gönderince, ittifak geçmişindeki tarih ve isim
+    alanlarının gerçek isimlerini görüp kodu kesinleştirebiliriz.
+    İşimiz bitince bu komutu kodda silebilirsin.
+    """
+    if not context.args:
+        await update.message.reply_text("Örnek: `/gecmistest SirlusBlaCK`", parse_mode="Markdown")
+        return
+
+    player_name = " ".join(context.args)
+
+    # Önce oyuncunun player_id'sini bulalım
+    durum, data = _tek_deneme(player_name)
+    if durum != "basarili":
+        # Büyük/küçük harf varyasyonlarını da dene
+        for isim in [player_name.lower(), player_name.upper(), player_name.capitalize(), player_name.title()]:
+            durum, data = _tek_deneme(isim)
+            if durum == "basarili":
+                break
+
+    if durum != "basarili":
+        await update.message.reply_text(f"Oyuncu bulunamadı: {player_name}")
+        return
+
+    player_id = data.get("player_id")
+    if not player_id:
+        await update.message.reply_text("player_id alınamadı, oyuncu verisinde bulunamadı.")
+        return
+
+    hist_url = f"{API_BASE}/updates/players/{player_id}/alliances"
+    try:
+        hist_res = requests.get(hist_url, headers=HEADERS, timeout=15)
+    except requests.exceptions.RequestException as e:
+        await update.message.reply_text(f"Bağlantı hatası: {e}")
+        return
+
+    import json
+
+    info = f"Durum kodu: {hist_res.status_code}\nAdres: {hist_url}\n\n"
+    try:
+        raw_text = json.dumps(hist_res.json(), ensure_ascii=False, indent=2)
+    except ValueError:
+        raw_text = hist_res.text
+
+    if len(raw_text) > 3000:
+        raw_text = raw_text[:3000] + "\n... (kısaltıldı)"
+
+    await update.message.reply_text(f"{info}```\n{raw_text}\n```", parse_mode="Markdown")
+
+
 def main():
     TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
 
@@ -234,6 +297,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("oyuncu", oyuncu_command))
     application.add_handler(CommandHandler("oyuncutest", oyuncutest_command))
+    application.add_handler(CommandHandler("gecmistest", gecmistest_command))
 
     print("Bot resmi API modunda aktif...")
     application.run_polling()
