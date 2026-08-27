@@ -1,161 +1,243 @@
 import os
 import logging
 import requests
-from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 
-# Logging ayarları
+# --------------------------------------------------------------------------
+# AYARLAR
+# --------------------------------------------------------------------------
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
+# gge-tracker.com'un RESMİ API adresi
+API_BASE = "https://api.gge-tracker.com/api/v1"
+
+# Dokümandan doğrulanmış, kesin doğru isim ve değer
+SERVER_HEADER_NAME = "gge-server"
+SERVER_VALUE = "TR1"
+
 # MİMLİ / DÜŞMAN İTTİFAKLAR LİSTESİ
 MIMLI_ITTIFAKLAR = ["GÖKDOĞAN", "DüşmanKlan1", "TheOttomans", "BlackDeath"]
 
-def get_player_real_stats(player_query):
-    """Bulut korumalarını ve yönlendirmeleri aşan güncellenmiş arama fonksiyonu."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://gge-tracker.com/",
-        "Cache-Control": "no-cache"
-    }
-    
-    player_link = None
-    
-    # 1. Eğer kullanıcı direkt ID girdiyse doğrudan profil linkini kur
-    if player_query.isdigit():
-        player_link = f"https://gge-tracker.com/player/{player_query}"
-    else:
-        # 2. İsimle arama yaparken hem küçük harfli hem orijinal halini deneyelim
-        queries_to_try = [player_query, player_query.lower(), player_query.capitalize()]
-        
-        for q in queries_to_try:
-            search_url = f"https://gge-tracker.com/players?player={requests.utils.quote(q)}&server=TR1"
-            try:
-                session = requests.Session()
-                res = session.get(search_url, headers=headers, timeout=12)
-                
-                if res.status_code == 200:
-                    soup = BeautifulSoup(res.text, 'html.parser')
-                    
-                    # Sayfadaki oyuncu linklerini tara
-                    for a in soup.find_all('a', href=True):
-                        href = a['href']
-                        if '/player/' in href:
-                            player_link = "https://gge-tracker.com" + href if href.startswith('/') else href
-                            break
-                    if player_link:
-                        break
-            except Exception as e:
-                logger.error(f"Arama deneme hatası: {e}")
+HEADERS = {
+    SERVER_HEADER_NAME: SERVER_VALUE,
+    "Accept": "application/json",
+}
 
-    if not player_link:
-        return f"'{player_query}' TR1 sunucusunda bulunamadı. Sitede ismin nasıl geçtiğini kontrol edebilirsin."
 
-    alliance_page_link = f"{player_link}#alliances"
-
+def _tek_deneme(player_name: str):
+    """
+    /players/{playerName} adresine tek bir istek atar.
+    Başarılıysa (durum, veri) döner, başarısızsa (durum, None) döner.
+    """
+    url = f"{API_BASE}/players/{requests.utils.quote(player_name)}"
     try:
-        session = requests.Session()
-        profile_res = session.get(player_link, headers=headers, timeout=12)
-        
-        might_value = "Bilinmiyor"
-        level_value = "Bilinmiyor"
-        alliances = []
-        
-        if profile_res.status_code == 200:
-            p_soup = BeautifulSoup(profile_res.text, 'html.parser')
-            
-            for el in p_soup.find_all(['div', 'span', 'td', 'li', 'p', 'b']):
-                text = el.get_text(strip=True)
-                
-                # İttifak geçmişi tarih kalıpları
-                if any(m in text for m in ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]) and len(text) < 100:
-                    if text not in alliances:
-                        alliances.append(text)
-                        
-                if "might" in text.lower() or "güç" in text.lower():
-                    might_value = text
-                if "level" in text.lower() or "seviye" in text.lower():
-                    level_value = text
+        res = requests.get(url, headers=HEADERS, timeout=15)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Bağlantı Hatası: {e}")
+        return "baglanti_hatasi", None
 
-        # Mimli düşman analizi
-        bulunan_dusmanlar = []
-        for ittifak in alliances:
-            for mimli in MIMLI_ITTIFAKLAR:
-                if mimli.lower() in ittifak.lower():
-                    if mimli not in bulunan_dusmanlar:
-                        bulunan_dusmanlar.append(mimli)
+    if res.status_code == 200:
+        try:
+            return "basarili", res.json()
+        except ValueError:
+            return "gecersiz_json", None
 
-        return {
-            "name": player_query,
-            "level": level_value,
-            "might": might_value,
-            "alliances": alliances[:5] if alliances else ["İttifak geçmişi detay sayfasında."],
-            "dusmanlar": bulunan_dusmanlar,
-            "profile_url": alliance_page_link
-        }
-            
-    except Exception as e:
-        logger.error(f"Profil hata: {e}")
-        return "Profil verileri çekilirken hata oluştu."
+    if res.status_code == 404:
+        return "bulunamadi", None
+    if res.status_code == 400:
+        return "gecersiz_format", None
+
+    logger.error(f"API hatası: {res.status_code} - {res.text[:300]}")
+    return "diger_hata", res.status_code
+
+
+def get_player_by_name(player_name: str):
+    """
+    1. Adım: /players/{playerName} ile oyuncunun güncel bilgilerini
+    (seviye, güç, güncel ittifak, player_id) çeker.
+
+    Site aramasında büyük/küçük harf farketmiyor; API ise farkedebiliyor.
+    Bu yüzden önce yazdığın haliyle deniyoruz, bulunamazsa arka arkaya
+    birkaç farklı büyük/küçük harf biçimini otomatik deniyoruz.
+    """
+    player_name = player_name.strip()
+
+    denenecek_isimler = [
+        player_name,             # yazdığın gibi
+        player_name.lower(),     # hepsi küçük harf
+        player_name.upper(),     # hepsi büyük harf
+        player_name.capitalize(),  # İlk harf büyük, gerisi küçük
+        player_name.title(),     # Her Kelimenin İlk Harfi Büyük
+    ]
+    # Aynı olanları listeden çıkar (gereksiz istek atmayalım)
+    denenecek_isimler = list(dict.fromkeys(denenecek_isimler))
+
+    data = None
+    for isim in denenecek_isimler:
+        durum, sonuc = _tek_deneme(isim)
+        if durum == "basarili":
+            data = sonuc
+            break
+        if durum == "baglanti_hatasi":
+            return "Veri çekilirken bağlantı hatası oluştu."
+        if durum == "gecersiz_format":
+            return "Oyuncu adı geçersiz formatta."
+        if durum == "diger_hata":
+            return f"Siteye erişilemedi (Kod: {sonuc})."
+        # "bulunamadi" ise sıradaki büyük/küçük harf biçimini dene
+
+    if data is None:
+        return f"'{player_name}' TR1 sunucusunda bulunamadı. Yazılışını kontrol edebilirsin reis."
+
+    player_id = data.get("player_id")
+    level_value = data.get("level", "Bilinmiyor")
+    might_value = data.get("might_current", "Bilinmiyor")
+    guncel_ittifak = data.get("alliance_name") or "İttifaksız"
+
+    # --------------------------------------------------------------------
+    # 2. Adım: ittifak geçmişi için ayrı istek atıyoruz.
+    # --------------------------------------------------------------------
+    alliances_text = []
+    if player_id:
+        hist_url = f"{API_BASE}/updates/players/{player_id}/alliances"
+        try:
+            hist_res = requests.get(hist_url, headers=HEADERS, timeout=15)
+            if hist_res.status_code == 200:
+                hist_data = hist_res.json()
+                # Liste muhtemelen bir "results" alanının içinde ya da
+                # doğrudan bir liste olarak geliyor; ikisini de deniyoruz.
+                items = hist_data if isinstance(hist_data, list) else hist_data.get("results", [])
+                for item in items[:5]:
+                    if isinstance(item, dict):
+                        name = (
+                            item.get("alliance_name")
+                            or item.get("name")
+                            or item.get("new_alliance_name")
+                            or str(item)
+                        )
+                        alliances_text.append(name)
+                    else:
+                        alliances_text.append(str(item))
+        except requests.exceptions.RequestException as e:
+            logger.error(f"İttifak geçmişi hatası: {e}")
+
+    if not alliances_text:
+        alliances_text = [guncel_ittifak] if guncel_ittifak != "İttifaksız" else ["İttifak geçmişi bulunamadı."]
+
+    # Mimli düşman analizi
+    bulunan_dusmanlar = []
+    for ittifak in alliances_text + [guncel_ittifak]:
+        for mimli in MIMLI_ITTIFAKLAR:
+            if mimli.lower() in ittifak.lower():
+                if mimli not in bulunan_dusmanlar:
+                    bulunan_dusmanlar.append(mimli)
+
+    profile_link = f"https://gge-tracker.com/players?player={requests.utils.quote(player_name)}&server=TR1"
+
+    return {
+        "name": data.get("player_name") or player_name,
+        "level": level_value,
+        "might": f"{might_value:,}".replace(",", ".") if isinstance(might_value, (int, float)) else might_value,
+        "guncel_ittifak": guncel_ittifak,
+        "alliances": alliances_text,
+        "dusmanlar": bulunan_dusmanlar,
+        "profile_url": profile_link,
+        "raw": data,
+    }
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Bot en kararlı sürümle aktif reis! 🚀 Sorgulamak için:\n`/oyuncu OyuncuAdi`", 
-        parse_mode="Markdown"
+        "Bot resmi API üzerinden çalışıyor, engellenme yok reis! 🚀\n"
+        "Sorgulamak için:\n`/oyuncu OyuncuAdi`\n(Örnek: `/oyuncu SirlusBlaCK`)",
+        parse_mode="Markdown",
     )
+
 
 async def oyuncu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
-            "Lütfen bir oyuncu adı girin!\nÖrnek: `/oyuncu siriusblack`",
-            parse_mode="Markdown"
+            "Lütfen bir oyuncu adı girin!\nÖrnek: `/oyuncu SirlusBlaCK`",
+            parse_mode="Markdown",
         )
         return
 
-    player_query = " ".join(context.args)
-    await update.message.reply_text(f"🔍 TR1 havuzunda '{player_query}' taranıyor...")
+    player_name = " ".join(context.args)
+    await update.message.reply_text(f"🔍 TR1 havuzunda '{player_name}' aranıyor ve analiz yapılıyor...")
 
-    result = get_player_real_stats(player_query)
+    result = get_player_by_name(player_name)
 
     if isinstance(result, str):
         await update.message.reply_text(result)
-    else:
-        alliance_list_text = "\n".join([f"• {item}" for item in result['alliances']])
-        
-        if result['dusmanlar']:
-            dusman_text = f"🚨 **DİKKAT! MİMLİ DÜŞMAN TESPİT EDİLDİ!**\nŞu düşman ittifaklarda bulundu: " + ", ".join([f"*{d}*" for d in result['dusmanlar']])
-        else:
-            dusman_text = "✅ Son kayıtlarında mimli düşman ittifak bulunamadı."
+        return
 
-        message = (
-            f"🏰 *TR1 İstihbarat Raporu:* `{result['name']}`\n\n"
-            f"⭐ *Seviye:* {result['level']}\n"
-            f"⚡ *Güç:* {result['might']}\n\n"
-            f"🛡️ *Son İttifak Geçmişi:*\n{alliance_list_text}\n\n"
-            f"{dusman_text}\n\n"
-            f"🔗 *Detaylı Profil:* {result['profile_url']}"
+    alliance_list_text = "\n".join([f"• {item}" for item in result["alliances"]])
+
+    if result["dusmanlar"]:
+        dusman_text = "🚨 **DİKKAT! MİMLİ DÜŞMAN TESPİT EDİLDİ!**\nŞu düşman ittifaklarda bulundu: " + ", ".join(
+            [f"*{d}*" for d in result["dusmanlar"]]
         )
-        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
+    else:
+        dusman_text = "✅ Son kayıtlarında mimli düşman ittifak bulunamadı."
+
+    message = (
+        f"🏰 *TR1 İstihbarat Raporu:* `{result['name']}`\n\n"
+        f"⭐ *Seviye:* {result['level']}\n"
+        f"⚡ *Güç:* {result['might']}\n"
+        f"🛡️ *Güncel İttifak:* {result['guncel_ittifak']}\n\n"
+        f"📜 *Son İttifak Geçmişi:*\n{alliance_list_text}\n\n"
+        f"{dusman_text}\n\n"
+        f"🔗 *Detaylı Profil:* {result['profile_url']}"
+    )
+    await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
+
+
+async def oyuncutest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /players/{playerName} adresinden gelen ham veriyi olduğu gibi gösterir.
+    İttifak geçmişi cevabının gerçek yapısını görmek istersen faydalı.
+    """
+    if not context.args:
+        await update.message.reply_text("Örnek: `/oyuncutest SirlusBlaCK`", parse_mode="Markdown")
+        return
+
+    player_name = " ".join(context.args)
+    result = get_player_by_name(player_name)
+
+    if isinstance(result, str):
+        await update.message.reply_text(result)
+        return
+
+    import json
+
+    raw_text = json.dumps(result["raw"], ensure_ascii=False, indent=2)
+    if len(raw_text) > 3500:
+        raw_text = raw_text[:3500] + "\n... (kısaltıldı)"
+
+    await update.message.reply_text(f"```\n{raw_text}\n```", parse_mode="Markdown")
+
 
 def main():
     TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
-    
+
     if not TOKEN:
         print("HATA: BOT_TOKEN bulunamadı!")
         return
 
     application = ApplicationBuilder().token(TOKEN).build()
-    
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("oyuncu", oyuncu_command))
+    application.add_handler(CommandHandler("oyuncutest", oyuncutest_command))
 
-    print("Bot kararlı sürümle çalışıyor...")
+    print("Bot resmi API modunda aktif...")
     application.run_polling()
+
 
 if __name__ == "__main__":
     main()
