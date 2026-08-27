@@ -1,5 +1,7 @@
 import os
 import logging
+from datetime import datetime
+
 import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
@@ -13,10 +15,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# gge-tracker.com'un RESMİ API adresi
 API_BASE = "https://api.gge-tracker.com/api/v1"
-
-# Dokümandan doğrulanmış, kesin doğru isim ve değer
 SERVER_HEADER_NAME = "gge-server"
 SERVER_VALUE = "TR1"
 
@@ -33,17 +32,43 @@ MIMLI_ITTIFAKLAR = [
     "ELITE 2",
 ]
 
+# Kaç tane geçmiş ittifak gösterilecek
+GECMIS_ITTIFAK_SAYISI = 5
+
 HEADERS = {
     SERVER_HEADER_NAME: SERVER_VALUE,
     "Accept": "application/json",
 }
 
 
+def temizle_isim(isim: str) -> str:
+    """İttifak isimlerindeki 【】~ gibi süslemeleri ve fazla boşlukları temizler."""
+    if not isim:
+        return ""
+    isim = isim.replace("【", "").replace("】", "").replace("~", "")
+    return " ".join(isim.split())
+
+
+def tarihi_formatla(iso_tarih: str) -> str:
+    """'2026-08-03T19:10:40.989Z' -> '03.08.2026' """
+    try:
+        dt = datetime.strptime(iso_tarih[:10], "%Y-%m-%d")
+        return dt.strftime("%d.%m.%Y")
+    except (ValueError, TypeError):
+        return iso_tarih or "Bilinmiyor"
+
+
+def mimli_mi(ittifak_adi: str) -> bool:
+    temiz = temizle_isim(ittifak_adi).lower()
+    for mimli in MIMLI_ITTIFAKLAR:
+        mimli_temiz = temizle_isim(mimli).lower()
+        if mimli_temiz in temiz or temiz in mimli_temiz:
+            return True
+    return False
+
+
 def _tek_deneme(player_name: str):
-    """
-    /players/{playerName} adresine tek bir istek atar.
-    Başarılıysa (durum, veri) döner, başarısızsa (durum, None) döner.
-    """
+    """/players/{playerName} adresine tek bir istek atar."""
     url = f"{API_BASE}/players/{requests.utils.quote(player_name)}"
     try:
         res = requests.get(url, headers=HEADERS, timeout=15)
@@ -66,86 +91,102 @@ def _tek_deneme(player_name: str):
     return "diger_hata", res.status_code
 
 
-def get_player_by_name(player_name: str):
+def oyuncuyu_bul(player_name: str):
     """
-    1. Adım: /players/{playerName} ile oyuncunun güncel bilgilerini
-    (seviye, güç, güncel ittifak, player_id) çeker.
-
-    Site aramasında büyük/küçük harf farketmiyor; API ise farkedebiliyor.
-    Bu yüzden önce yazdığın haliyle deniyoruz, bulunamazsa arka arkaya
-    birkaç farklı büyük/küçük harf biçimini otomatik deniyoruz.
+    Büyük/küçük harf farketmeksizin oyuncuyu bulmaya çalışır.
+    Döner: ("basarili", data) ya da (hata_metni, None)
     """
     player_name = player_name.strip()
+    denenecek_isimler = list(dict.fromkeys([
+        player_name,
+        player_name.lower(),
+        player_name.upper(),
+        player_name.capitalize(),
+        player_name.title(),
+    ]))
 
-    denenecek_isimler = [
-        player_name,             # yazdığın gibi
-        player_name.lower(),     # hepsi küçük harf
-        player_name.upper(),     # hepsi büyük harf
-        player_name.capitalize(),  # İlk harf büyük, gerisi küçük
-        player_name.title(),     # Her Kelimenin İlk Harfi Büyük
-    ]
-    # Aynı olanları listeden çıkar (gereksiz istek atmayalım)
-    denenecek_isimler = list(dict.fromkeys(denenecek_isimler))
-
-    data = None
     for isim in denenecek_isimler:
         durum, sonuc = _tek_deneme(isim)
         if durum == "basarili":
-            data = sonuc
-            break
+            return "basarili", sonuc
         if durum == "baglanti_hatasi":
-            return "Veri çekilirken bağlantı hatası oluştu."
+            return "Veri çekilirken bağlantı hatası oluştu.", None
         if durum == "gecersiz_format":
-            return "Oyuncu adı geçersiz formatta."
+            return "Oyuncu adı geçersiz formatta.", None
         if durum == "diger_hata":
-            return f"Siteye erişilemedi (Kod: {sonuc})."
+            return f"Siteye erişilemedi (Kod: {sonuc}).", None
         # "bulunamadi" ise sıradaki büyük/küçük harf biçimini dene
 
-    if data is None:
-        return f"'{player_name}' TR1 sunucusunda bulunamadı. Yazılışını kontrol edebilirsin reis."
+    return f"'{player_name}' TR1 sunucusunda bulunamadı. Yazılışını kontrol edebilirsin reis.", None
+
+
+def ittifak_gecmisini_getir(player_id: str):
+    """
+    /updates/players/{playerId}/alliances adresinden ittifak geçmişini çeker.
+    Son GECMIS_ITTIFAK_SAYISI kadar farklı (benzersiz) ittifağı, tarihleriyle
+    birlikte, en yeniden en eskiye doğru sıralı liste olarak döner:
+        [{"isim": "...", "tarih": "03.08.2026"}, ...]
+    """
+    url = f"{API_BASE}/updates/players/{player_id}/alliances"
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=15)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"İttifak geçmişi bağlantı hatası: {e}")
+        return []
+
+    if res.status_code != 200:
+        logger.error(f"İttifak geçmişi API hatası: {res.status_code}")
+        return []
+
+    try:
+        data = res.json()
+    except ValueError:
+        return []
+
+    updates = data.get("updates", [])
+
+    sonuc = []
+    gorulen_isimler = set()
+
+    for kayit in updates:
+        yeni_isim = kayit.get("original_new_alliance_name") or kayit.get("new_alliance_name")
+        if not yeni_isim:
+            continue  # bu kayıt bir "ittifaktan ayrılma" kaydı, atla
+
+        temiz_isim = temizle_isim(yeni_isim)
+        if not temiz_isim or temiz_isim in gorulen_isimler:
+            continue  # aynı ittifakı (rename'ler dahil) tekrar sayma
+
+        gorulen_isimler.add(temiz_isim)
+        sonuc.append({
+            "isim": temiz_isim,
+            "tarih": tarihi_formatla(kayit.get("date", "")),
+        })
+
+        if len(sonuc) >= GECMIS_ITTIFAK_SAYISI:
+            break
+
+    return sonuc
+
+
+def get_player_by_name(player_name: str):
+    """Oyuncunun tüm bilgilerini (seviye, güç, ittifak geçmişi, mimli analiz) toplar."""
+    durum, data = oyuncuyu_bul(player_name)
+    if durum != "basarili":
+        return durum  # hata mesajı
 
     player_id = data.get("player_id")
     level_value = data.get("level", "Bilinmiyor")
     might_value = data.get("might_current", "Bilinmiyor")
-    guncel_ittifak = data.get("alliance_name") or "İttifaksız"
+    guncel_ittifak = temizle_isim(data.get("alliance_name") or "") or "İttifaksız"
 
-    # --------------------------------------------------------------------
-    # 2. Adım: ittifak geçmişi için ayrı istek atıyoruz.
-    # --------------------------------------------------------------------
-    alliances_text = []
-    if player_id:
-        hist_url = f"{API_BASE}/updates/players/{player_id}/alliances"
-        try:
-            hist_res = requests.get(hist_url, headers=HEADERS, timeout=15)
-            if hist_res.status_code == 200:
-                hist_data = hist_res.json()
-                # Liste muhtemelen bir "results" alanının içinde ya da
-                # doğrudan bir liste olarak geliyor; ikisini de deniyoruz.
-                items = hist_data if isinstance(hist_data, list) else hist_data.get("results", [])
-                for item in items[:5]:
-                    if isinstance(item, dict):
-                        name = (
-                            item.get("alliance_name")
-                            or item.get("name")
-                            or item.get("new_alliance_name")
-                            or str(item)
-                        )
-                        alliances_text.append(name)
-                    else:
-                        alliances_text.append(str(item))
-        except requests.exceptions.RequestException as e:
-            logger.error(f"İttifak geçmişi hatası: {e}")
+    gecmis = ittifak_gecmisini_getir(player_id) if player_id else []
 
-    if not alliances_text:
-        alliances_text = [guncel_ittifak] if guncel_ittifak != "İttifaksız" else ["İttifak geçmişi bulunamadı."]
+    if not gecmis:
+        gecmis = [{"isim": guncel_ittifak, "tarih": "Bilinmiyor"}] if guncel_ittifak != "İttifaksız" else []
 
-    # Mimli düşman analizi
-    bulunan_dusmanlar = []
-    for ittifak in alliances_text + [guncel_ittifak]:
-        for mimli in MIMLI_ITTIFAKLAR:
-            if mimli.lower() in ittifak.lower():
-                if mimli not in bulunan_dusmanlar:
-                    bulunan_dusmanlar.append(mimli)
+    # Mimli düşman analizi: geçmişteki HER ittifak için ayrı ayrı kontrol
+    mimli_kayitlar = [kayit for kayit in gecmis if mimli_mi(kayit["isim"])]
 
     profile_link = f"https://gge-tracker.com/players?player={requests.utils.quote(player_name)}&server=TR1"
 
@@ -154,8 +195,8 @@ def get_player_by_name(player_name: str):
         "level": level_value,
         "might": f"{might_value:,}".replace(",", ".") if isinstance(might_value, (int, float)) else might_value,
         "guncel_ittifak": guncel_ittifak,
-        "alliances": alliances_text,
-        "dusmanlar": bulunan_dusmanlar,
+        "gecmis": gecmis,
+        "mimli_kayitlar": mimli_kayitlar,
         "profile_url": profile_link,
         "raw": data,
     }
@@ -186,12 +227,11 @@ async def oyuncu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(result)
         return
 
-    alliance_list_text = "\n".join([f"• {item}" for item in result["alliances"]])
+    gecmis_text = "\n".join([f"• {k['isim']} — {k['tarih']}" for k in result["gecmis"]]) or "Kayıt bulunamadı."
 
-    if result["dusmanlar"]:
-        dusman_text = "🚨 **DİKKAT! MİMLİ DÜŞMAN TESPİT EDİLDİ!**\nŞu düşman ittifaklarda bulundu: " + ", ".join(
-            [f"*{d}*" for d in result["dusmanlar"]]
-        )
+    if result["mimli_kayitlar"]:
+        satirlar = [f"   ⚠️ {k['isim']} — {k['tarih']} tarihinde bu ittifaktaydı" for k in result["mimli_kayitlar"]]
+        dusman_text = "🚨 **DİKKAT! MİMLİ DÜŞMAN GEÇMİŞİ TESPİT EDİLDİ!**\n" + "\n".join(satirlar)
     else:
         dusman_text = "✅ Son kayıtlarında mimli düşman ittifak bulunamadı."
 
@@ -200,7 +240,7 @@ async def oyuncu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⭐ *Seviye:* {result['level']}\n"
         f"⚡ *Güç:* {result['might']}\n"
         f"🛡️ *Güncel İttifak:* {result['guncel_ittifak']}\n\n"
-        f"📜 *Son İttifak Geçmişi:*\n{alliance_list_text}\n\n"
+        f"📜 *Son {GECMIS_ITTIFAK_SAYISI} İttifak Geçmişi:*\n{gecmis_text}\n\n"
         f"{dusman_text}\n\n"
         f"🔗 *Detaylı Profil:* {result['profile_url']}"
     )
@@ -208,81 +248,24 @@ async def oyuncu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def oyuncutest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /players/{playerName} adresinden gelen ham veriyi olduğu gibi gösterir.
-    İttifak geçmişi cevabının gerçek yapısını görmek istersen faydalı.
-    """
+    """/players/{playerName} adresinden gelen ham veriyi olduğu gibi gösterir (test amaçlı)."""
     if not context.args:
         await update.message.reply_text("Örnek: `/oyuncutest SirlusBlaCK`", parse_mode="Markdown")
         return
 
     player_name = " ".join(context.args)
-    result = get_player_by_name(player_name)
-
-    if isinstance(result, str):
-        await update.message.reply_text(result)
+    durum, data = oyuncuyu_bul(player_name)
+    if durum != "basarili":
+        await update.message.reply_text(durum)
         return
 
     import json
 
-    raw_text = json.dumps(result["raw"], ensure_ascii=False, indent=2)
+    raw_text = json.dumps(data, ensure_ascii=False, indent=2)
     if len(raw_text) > 3500:
         raw_text = raw_text[:3500] + "\n... (kısaltıldı)"
 
     await update.message.reply_text(f"```\n{raw_text}\n```", parse_mode="Markdown")
-
-
-async def gecmistest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    SADECE TEST İÇİN: /updates/players/{playerId}/alliances adresinin
-    ham (işlenmemiş) cevabını olduğu gibi gösterir. Bunu bir kere
-    çalıştırıp Claude'a gönderince, ittifak geçmişindeki tarih ve isim
-    alanlarının gerçek isimlerini görüp kodu kesinleştirebiliriz.
-    İşimiz bitince bu komutu kodda silebilirsin.
-    """
-    if not context.args:
-        await update.message.reply_text("Örnek: `/gecmistest SirlusBlaCK`", parse_mode="Markdown")
-        return
-
-    player_name = " ".join(context.args)
-
-    # Önce oyuncunun player_id'sini bulalım
-    durum, data = _tek_deneme(player_name)
-    if durum != "basarili":
-        # Büyük/küçük harf varyasyonlarını da dene
-        for isim in [player_name.lower(), player_name.upper(), player_name.capitalize(), player_name.title()]:
-            durum, data = _tek_deneme(isim)
-            if durum == "basarili":
-                break
-
-    if durum != "basarili":
-        await update.message.reply_text(f"Oyuncu bulunamadı: {player_name}")
-        return
-
-    player_id = data.get("player_id")
-    if not player_id:
-        await update.message.reply_text("player_id alınamadı, oyuncu verisinde bulunamadı.")
-        return
-
-    hist_url = f"{API_BASE}/updates/players/{player_id}/alliances"
-    try:
-        hist_res = requests.get(hist_url, headers=HEADERS, timeout=15)
-    except requests.exceptions.RequestException as e:
-        await update.message.reply_text(f"Bağlantı hatası: {e}")
-        return
-
-    import json
-
-    info = f"Durum kodu: {hist_res.status_code}\nAdres: {hist_url}\n\n"
-    try:
-        raw_text = json.dumps(hist_res.json(), ensure_ascii=False, indent=2)
-    except ValueError:
-        raw_text = hist_res.text
-
-    if len(raw_text) > 3000:
-        raw_text = raw_text[:3000] + "\n... (kısaltıldı)"
-
-    await update.message.reply_text(f"{info}```\n{raw_text}\n```", parse_mode="Markdown")
 
 
 def main():
@@ -297,7 +280,6 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("oyuncu", oyuncu_command))
     application.add_handler(CommandHandler("oyuncutest", oyuncutest_command))
-    application.add_handler(CommandHandler("gecmistest", gecmistest_command))
 
     print("Bot resmi API modunda aktif...")
     application.run_polling()
