@@ -19,17 +19,31 @@ API_BASE = "https://api.gge-tracker.com/api/v1"
 SERVER_HEADER_NAME = "gge-server"
 SERVER_VALUE = "TR1"
 
-# MİMLİ / DÜŞMAN İTTİFAKLAR LİSTESİ
+# MİMLİ / DÜŞMAN İTTİFAKLAR LİSTESİ (güncellendi)
 MIMLI_ITTIFAKLAR = [
+    # 1-8
     "Grand Alliance",
     "ELITE",
     "DARK OF SOUL",
     "PAYİTAHT",
-    "GÖKDOĞAN",
+    "GÖKDOĞAN",          # API'de [GÖKDOĞAN] gelebilir
     "VICTORY",
     "SARSILMAZ",
     "WARRIOR",
+    # 11
+    "ANKEBUT",
+    # 14
     "ELITE 2",
+    # 16
+    "Winged Hussars",
+    # 17
+    "DEVLET-İ ALİYYE",
+    # 18
+    "...TURAN...",
+    # 21
+    "HEYULA",
+    # 30
+    "SUMUD FİLOSU",
 ]
 
 # Kaç tane geçmiş ittifak gösterilecek
@@ -42,10 +56,11 @@ HEADERS = {
 
 
 def temizle_isim(isim: str) -> str:
-    """İttifak isimlerindeki 【】~ gibi süslemeleri ve fazla boşlukları temizler."""
+    """İttifak isimlerindeki süslemeleri (【】~[] ) ve fazla boşlukları temizler."""
     if not isim:
         return ""
     isim = isim.replace("【", "").replace("】", "").replace("~", "")
+    isim = isim.replace("[", "").replace("]", "")   # köşeli parantezleri temizle
     return " ".join(isim.split())
 
 
@@ -59,10 +74,11 @@ def tarihi_formatla(iso_tarih: str) -> str:
 
 
 def mimli_mi(ittifak_adi: str) -> bool:
-    temiz = temizle_isim(ittifak_adi).lower()
+    # Tüm boşlukları kaldırıp küçük harfe çevirerek karşılaştır
+    temiz = temizle_isim(ittifak_adi).lower().replace(" ", "")
     for mimli in MIMLI_ITTIFAKLAR:
-        mimli_temiz = temizle_isim(mimli).lower()
-        if mimli_temiz in temiz or temiz in mimli_temiz:
+        mimli_temiz = temizle_isim(mimli).lower().replace(" ", "")
+        if mimli_temiz and (mimli_temiz in temiz or temiz in mimli_temiz):
             return True
     return False
 
